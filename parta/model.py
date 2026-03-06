@@ -68,26 +68,29 @@ class TransformerBlock(nn.Module):
         super().__init__()
         self.mha = MultiHeadAttention(d_model,num_heads)
         self.ffn = FFN(d_model)
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
+        self.norm1 = nn.LayerNorm(d_model, elementwise_affine=True)
+        self.norm2 = nn.LayerNorm(d_model, elementwise_affine=True)
 
     def forward(self,x,mask=None,mode='standard',S=1):
-        x = self.mha(self.norm1(x),mask,mode,S) + x
+        attn_output, _ = self.mha(self.norm1(x),mask,mode,S)
+        x = attn_output + x
         x = self.ffn(self.norm2(x)) + x
         return x
     
 
+class SinusoidalPositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len=512):
+        super().__init__()
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * -(np.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe)
 
-
-
-
-
-
-
-
-
-
-
+    def forward(self, x):
+        B,L,D = x.shape
+        return x + self.pe[:L, :].unsqueeze(0)
 
 
 class LanguageModel(nn.Module):
