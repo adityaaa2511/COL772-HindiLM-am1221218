@@ -41,12 +41,12 @@ class MultiHeadAttention(nn.Module):
         x = x.transpose(1,2).contiguous().view(B,L,self.d_model)
         return x
     
-    def forward(self, x, mask=None, mode='standard', S=1):
+    def forward(self, x, mask=None, mode='standard', tau=1):
         B,L,_ = x.shape
         Q = self.split_heads(self.W_q(x))
         K = self.split_heads(self.W_k(x))
         V = self.split_heads(self.W_v(x))
-        attn_output, attn_wts = scaled_dot_product_attention(Q,K,V,mask,mode,S)
+        attn_output, attn_wts = scaled_dot_product_attention(Q,K,V,mask,mode,tau)
         attn_output = self.merge_heads(attn_output)
         output = self.out_proj(attn_output)
         return output, attn_wts
@@ -71,8 +71,8 @@ class TransformerBlock(nn.Module):
         self.norm1 = nn.LayerNorm(d_model, elementwise_affine=True)
         self.norm2 = nn.LayerNorm(d_model, elementwise_affine=True)
 
-    def forward(self,x,mask=None,mode='standard',S=1):
-        attn_output, _ = self.mha(self.norm1(x),mask,mode,S)
+    def forward(self,x,mask=None,mode='standard',tau=1):
+        attn_output, _ = self.mha(self.norm1(x),mask,mode,tau)
         x = attn_output + x
         x = self.ffn(self.norm2(x)) + x
         return x
