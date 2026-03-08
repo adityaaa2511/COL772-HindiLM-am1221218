@@ -4,15 +4,15 @@ import torch.nn.functional as F
 import numpy as np
 from typing import Any, Dict, List
 
-def scaled_dot_product_attention(query,key,value,mask=None,mode='standard',S=1):
-    "Size of mask = (B,L)"
+def scaled_dot_product_attention(query,key,value,mask=None,mode='standard',tau=1):
+    "Size of mask = (B,L,L)"
     B,H,L,D = query.shape
     x = torch.matmul(query,key.transpose(-2,-1)) / D**0.5
-    if mask is not None:
-        mask = mask.unsqueeze(1).unsqueeze(2)  # required size (B, 1, 1, L)
-        x = x + mask
     if mode == 'tanh-clipped':
-        x = torch.tanh(x) * S
+        x = torch.tanh(x) * tau
+    if mask is not None:
+        mask = mask.unsqueeze(1)  # required size (B, 1, L, L) to broadcast across heads
+        x = x + mask
 
     attn_wts = F.softmax(x,dim=-1)
     output = torch.matmul(attn_wts,value)
@@ -25,10 +25,10 @@ class MultiHeadAttention(nn.Module):
         self.d_model = d_model
         self.num_heads = num_heads
         self.d_k = d_model // num_heads
-        self.W_q = nn.Linear(d_model,d_model)
-        self.W_k = nn.Linear(d_model,d_model)
-        self.W_v = nn.Linear(d_model,d_model)
-        self.out_proj = nn.Linear(d_model,d_model)
+        self.W_q = nn.Linear(d_model,d_model, bias=False)
+        self.W_k = nn.Linear(d_model,d_model, bias=False)
+        self.W_v = nn.Linear(d_model,d_model, bias=False)
+        self.out_proj = nn.Linear(d_model,d_model, bias=False)
 
 
     def split_heads(self,x):
@@ -103,8 +103,27 @@ class LanguageModel(nn.Module):
         """
         Build the LanguageModel based on the config.
         """
-        self.config = config
         super().__init__()
+        self.config = config
+        self.d_model = config['d_model']
+        self.n_heads = config['n_heads']
+        self.d_heads = config['d_head']
+        self.n_layers = config['n_layers']
+        self.vocab_size = config['vocab_size']
+        self.mode = config.get('mode', 'standard')
+        self.tau = config.get('tau', 1)
+
+        self.W_vocab = nn.Embedding(self.vocab_size, self.d_model)
+        self.layers = nn.ModuleList([TransformerBlock(self.d_model, self.n_heads) for _ in range(self.n_layers)])
+        self.pos_encoding = SinusoidalPositionalEncoding(self.d_model)
+        self.W_devocab = nn.Linear(self.d_model, self.vocab_size, bias=False)
+        self.final_ln = nn.LayerNorm(self.d_model, elementwise_affine=True)
+
+    def create_causal_mask(self, L, device):
+
+        mask = torch.triu(torch.ones(L, L, device=device), diagonal=1)
+        mask = mask.masked_fill(mask == 1, float('-inf'))
+        return mask
 
     def set_weights(self, weights: Dict[str, Any]):
         """
@@ -115,7 +134,55 @@ class LanguageModel(nn.Module):
         Parameters:
             - weights: A dictionary containing the model's weights. The structure of this dictionary will depend on how you design your model.
         """
-        raise NotImplementedError("Implement set_weights as described in assignment document")
+        with torch.no_grad():
+
+            self.W_vocab.weight.copy_(weights['W_vocab'].T)
+            self.W_devocab.weight.copy_(weights['W_devocab'].T)
+            self.final_ln.weight.copy_(weights['gamma_final'])
+            self.final_ln.bias.copy_(weights['beta_final'])
+
+            for i in range(self.n_layers):
+
+                layer_id = i+1
+                layer = self.layers[i]
+
+                Wq_list = []
+                Wk_list = []
+                Wv_list = []
+
+                for h in range(self.n_heads):
+
+                    head_id = h+1
+
+                    Wq = weights[f'W_{layer_id}_Q_{head_id}']
+                    Wk = weights[f'W_{layer_id}_K_{head_id}']
+                    Wv = weights[f'W_{layer_id}_V_{head_id}']
+
+                    Wq_list.append(Wq)
+                    Wk_list.append(Wk)
+                    Wv_list.append(Wv)
+
+                Wq_cat = torch.cat(Wq_list, dim=0)
+                Wk_cat = torch.cat(Wk_list, dim=0)
+                Wv_cat = torch.cat(Wv_list, dim=0)
+
+                layer.mha.W_q.weight.copy_(Wq_cat.T)
+                layer.mha.W_k.weight.copy_(Wk_cat.T)
+                layer.mha.W_v.weight.copy_(Wv_cat.T)
+
+                Wo = weights[f'W_{layer_id}_O']
+                layer.mha.out_proj.weight.copy_(Wo.T)
+
+                layer.ffn.net[0].weight.copy_(weights[f'W_{layer_id}_up'].T)
+                layer.ffn.net[0].bias.copy_(weights[f'b_{layer_id}_up'])
+                layer.ffn.net[2].weight.copy_(weights[f'W_{layer_id}_down'].T)
+                layer.ffn.net[2].bias.copy_(weights[f'b_{layer_id}_down'])
+
+                layer.norm1.weight.copy_(weights[f'gamma_{layer_id}_1'])
+                layer.norm1.bias.copy_(weights[f'beta_{layer_id}_1'])
+                layer.norm2.weight.copy_(weights[f'gamma_{layer_id}_2'])
+                layer.norm2.bias.copy_(weights[f'beta_{layer_id}_2'])
+
 
     def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         """
@@ -129,8 +196,25 @@ class LanguageModel(nn.Module):
             - A tensor of shape (batch_size, sequence_len, vocab_size) containing the logits for each token in the vocabulary.
             Logits are the raw, unnormalized scores output by the model, which can be converted to probabilities using a softmax function.
         """
-        raise NotImplementedError("Implement forward as described in assignment document")
 
+        B, L = input_ids.shape
+        device = input_ids.device
+        X = self.W_vocab(input_ids)
+        X = self.pos_encoding(X)
+
+        causal_mask = self.create_causal_mask(L, device)
+
+        padding_mask = torch.zeros_like(attention_mask, dtype=torch.float, device=device)
+        padding_mask = padding_mask.masked_fill(attention_mask == 0, float('-inf'))
+
+        combined_mask = padding_mask.unsqueeze(1) + causal_mask # Shape = (B, L, L)
+
+        for layer in self.layers:
+            X = layer(X, combined_mask, self.mode, self.tau)
+
+        X = self.final_ln(X)
+        logits = self.W_devocab(X)
+        return logits
 
 
 def load_model(config: Dict[str, Any], weights: Dict[str, Any]):
@@ -153,4 +237,24 @@ def collate_fn(batch: Dict[str, List[torch.tensor]]) -> Dict[str, torch.Tensor]:
     Ensure that the function takes in a batch of data and outputs a dictionary of tensors ready to be fed into the model.
     """
     PAD_ID = 0  # Assume 0 is the padding token ID
-    raise NotImplementedError("Implement collate_fn as described in assignment document")
+    
+    input_ids = batch['input_ids']
+    attention_masks = batch['attention_mask']
+
+    max_len = max(len(ids) for ids in input_ids)
+
+    padded_ids = []
+    padded_masks = []
+
+    for ids, mask in zip(input_ids, attention_masks):
+        pad_len = max_len - len(ids)
+        padded_ids.append(torch.cat([ids, torch.full((pad_len,), PAD_ID)]))
+        padded_masks.append(torch.cat([mask, torch.zeros(pad_len)]))
+
+    input_ids = torch.stack(padded_ids).long()
+    attention_mask = torch.stack(padded_masks).long()
+
+    return {
+        "input_ids": input_ids,
+        "attention_mask": attention_mask
+    }
