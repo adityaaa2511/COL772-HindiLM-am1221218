@@ -1,0 +1,66 @@
+name: Log Every Commit to Google Form
+
+on: [push]
+
+jobs:
+  log-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0  # Required to see full history
+
+      - name: Send Each Commit to Google Form
+        run: |
+          # --- 1. GET BRANCH NAME ---
+          # Strip 'refs/heads/' from the variable to get 'main', 'dev', etc.
+          BRANCH_NAME=${GITHUB_REF#refs/heads/}
+          echo "Current Branch: $BRANCH_NAME"
+
+          # --- 2. DETERMINE COMMIT RANGE ---
+          # If 'before' is 00000000... it means this is a NEW BRANCH or NEW REPO.
+          # In this case, we don't have a "before", so we log the last 30 commits 
+          # to ensure we catch everything in this initial push.
+          
+          if [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
+            # BUG FIX: changed from 'HEAD -n 1' to 'HEAD -n 30'
+            RANGE="HEAD -n 30"
+          else
+            # Normal push: Just log what's new between previous state and now
+            RANGE="${{ github.event.before }}..${{ github.event.after }}"
+          fi
+
+          echo "Scanning range: $RANGE"
+
+          # --- 3. LOOP AND LOG ---
+          # %h = Hash, %s = Message, %an = Author Name
+          
+          git log --format="%h|%s|%an" $RANGE | while read line; do
+            
+            # Parse the line (using | as separator)
+            COMMIT_HASH=$(echo "$line" | cut -d'|' -f1)
+            COMMIT_MSG=$(echo "$line" | cut -d'|' -f2)
+            COMMIT_AUTHOR=$(echo "$line" | cut -d'|' -f3)
+            REPO_NAME="${{ github.repository }}"
+            
+            echo ">> Logging commit: $COMMIT_HASH ($COMMIT_MSG)"
+
+            # --- 4. SEND TO GOOGLE FORM ---
+            # Replace entry.IDs with your specific ones
+            
+            FORM_URL="https://docs.google.com/forms/d/e/1FAIpQLSeXTaNZjc0IDLM2GfBi0crs68Z19jagB3sIsWxlS8yndx8Ntw/formResponse"
+
+            curl -s -L \
+              --data-urlencode "entry.2033791223=$COMMIT_HASH" \
+              --data-urlencode "entry.1199036736=$COMMIT_MSG" \
+              --data-urlencode "entry.541262481=$COMMIT_AUTHOR" \
+              --data-urlencode "entry.569230259=$REPO_NAME" \
+              --data-urlencode "entry.816368094=$BRANCH_NAME" \
+              "$FORM_URL"
+
+            # Pause to be polite to Google's servers
+            sleep 1
+          done
+          
+          echo "✅ Batch logging complete."

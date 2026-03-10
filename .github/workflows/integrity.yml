@@ -1,0 +1,51 @@
+name: Integrity Check (Strict)
+
+on: [push]
+
+jobs:
+  verify-timestamps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0 
+
+      - name: Scan Commits
+        run: |
+          # 1. Define Range
+          if [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
+            RANGE="HEAD"
+          else
+            RANGE="${{ github.event.before }}..${{ github.event.after }}"
+          fi
+
+          # 2. Settings
+          MAX_LAG_HOURS=24
+          NOW=$(date +%s)
+          FAILURE_FOUND=0
+
+          echo "Scanning commits in range: $RANGE"
+          
+          # Use process substitution to avoid subshell issues with pipes
+          while read line; do
+            HASH=$(echo "$line" | cut -d'|' -f1)
+            COMMIT_TS=$(echo "$line" | cut -d'|' -f2)
+            
+            AGE=$((NOW - COMMIT_TS))
+            AGE_HOURS=$((AGE / 3600))
+            
+            if [ "$AGE_HOURS" -gt "$MAX_LAG_HOURS" ]; then
+              echo "::error::Commit $HASH is backdated! ($AGE_HOURS hours old)."
+              FAILURE_FOUND=1
+            else
+              echo "Commit $HASH is OK ($AGE_HOURS hours old)."
+            fi
+          done < <(git log --format="%h|%at" $RANGE)
+
+          # 3. Final Judgment
+          if [ "$FAILURE_FOUND" -eq 1 ]; then
+            echo "::error::Integrity check failed. See logs above."
+            exit 1
+          fi
+          
+          echo "✅ Integrity verified."

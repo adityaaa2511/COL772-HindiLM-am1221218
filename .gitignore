@@ -1,3 +1,4 @@
 /env
 */__pycache__/
 parta/data
+parta/git_commit.txt
