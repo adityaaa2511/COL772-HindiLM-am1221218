@@ -3,7 +3,7 @@ import re
 from collections import defaultdict
 
 class BPETokenizer:
-    def __init__(self, vocab_size, special_tokens=None):
+    def __init__(self, vocab_size=1000, special_tokens=None):
         self.target_vocab_size = vocab_size
         self.special_tokens = special_tokens or ["<PAD>", "<UNK>", "<SOS>", "<EOS>"]
         self.merges = []
@@ -49,6 +49,9 @@ class BPETokenizer:
             for ch in word.split():
                 char_vocab.add(ch)
 
+        for cp in range(0x0900, 0x0980): # Add devnagiri characters to the character vocabulary
+            char_vocab.add(chr(cp))
+
         current_vocab_size = len(self.special_tokens) + len(char_vocab)
 
         self.merges = []
@@ -84,11 +87,39 @@ class BPETokenizer:
 
         self.inverse_vocab = {v: k for k, v in self.vocab.items()}
 
+    def apply_merges(self, token_list):
+        for pair_a, pair_b in self.merges:
+            i = 0
+            while i < len(token_list) - 1:
+                if token_list[i] == pair_a and token_list[i + 1] == pair_b:
+                    token_list = token_list[:i] + [pair_a + pair_b] + token_list[i + 2:]
+                    # Don't increment i so we can check for further merges at same position
+                else:
+                    i += 1
+        return token_list
+
     def encode(self, text):
-        raise NotImplementedError("Encoding method not implemented yet.")
+        unk_id = self.vocab.get("<UNK>", 1)
+        words = re.findall(r"\S+", text)
+        token_ids = []
+
+        for word in words:
+            chars = list(word) + ["</w>"]
+            tokens = self.apply_merges(chars)
+            for token in tokens:
+                token_ids.append(self.vocab.get(token, unk_id))
+
+        return token_ids
 
     def decode(self, token_ids):
-        raise NotImplementedError("Decoding method not implemented yet.")
+        tokens = []
+        for tid in token_ids:
+            token = self.inverse_vocab.get(tid, "<UNK>")
+            tokens.append(token)
+
+        text = "".join(tokens)
+        text = text.replace("</w>", " ")
+        return text.strip()
 
     def save(self, dirpath):
         data = {
