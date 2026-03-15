@@ -1,6 +1,7 @@
 import json
 import re
 import os
+import time
 from collections import defaultdict
 
 class BPETokenizer:
@@ -18,12 +19,15 @@ class BPETokenizer:
         self._special_token_set = set(self.special_tokens)
         if self.special_tokens:
             escaped = sorted((re.escape(token) for token in self.special_tokens), key=len, reverse=True)
-            pattern = "|".join(escaped) + r"|\s+"
+            pattern = "|".join(escaped)
+            self._segment_boundary_pattern = re.compile(pattern)
         else:
-            pattern = r"\s+"
-        self._segment_boundary_pattern = re.compile(pattern)
+            self._segment_boundary_pattern = None
 
     def _segments(self, text):
+        # Split only around special tokens. Keep normal text chunks intact (including spaces)
+        if not self._segment_boundary_pattern:
+            return [text] if text else []
         segments = []
         last_index = 0
 
@@ -84,13 +88,17 @@ class BPETokenizer:
             for symbol in symbols:
                 char_vocab.add(symbol)
 
-        for cp in range(0x0900, 0x0980): # Add devnagiri characters to the character vocabulary
-            char_vocab.add(chr(cp))
+        # for cp in range(0x0900, 0x0980): # Add devnagiri characters to the character vocabulary
+        #     char_vocab.add(chr(cp))
 
         current_vocab_size = len(self.special_tokens) + len(char_vocab)
 
         self.merges = []
+        train_start = time.monotonic()
         while current_vocab_size < self.target_vocab_size:
+            if time.monotonic() - train_start > 10000:  # Timeout 
+                break
+
             stats = self.get_stats(splits)
             if not stats:
                 break
