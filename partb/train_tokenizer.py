@@ -7,13 +7,13 @@ def main(args):
     corpus = []
     with open(args.input_corpus_path, 'r', encoding='utf-8') as f:
         for line in f:
-            corpus.append(line.strip())
+            corpus.append(line.rstrip('\n'))
 
     if args.train_path is not None:
         print(f"Loading training data from {args.train_path}...")
         with open(args.train_path, 'r', encoding='utf-8') as f:
             for line in f:
-                corpus.append(line.strip())
+                corpus.append(line.rstrip('\n'))
 
     print(f"Loaded {len(corpus)} sentences from the dataset.")
     tokenizer = BPETokenizer(args.vocab_size)
