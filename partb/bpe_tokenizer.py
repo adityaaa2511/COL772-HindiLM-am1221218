@@ -70,14 +70,13 @@ class BPETokenizer:
 
         for line in lines:
             for segment in self._segments(line):
-                
                 if segment in self._special_token_set:
                     continue
                 segment_freqs[segment] += 1
 
         splits = {}
         for segment, freq in segment_freqs.items():
-            symbols = tuple(list(segment) + ["</w>"])
+            symbols = tuple(list(segment))
             splits[symbols] = freq
 
         char_vocab = set()
@@ -142,7 +141,7 @@ class BPETokenizer:
             if segment in self._special_token_set:
                 token_ids.append(self.vocab.get(segment, unk_id))
                 continue
-            chars = list(segment) + ["</w>"]
+            chars = list(segment)
             tokens = self.apply_merges(chars)
             for token in tokens:
                 token_ids.append(self.vocab.get(token, unk_id))
@@ -156,7 +155,6 @@ class BPETokenizer:
             tokens.append(token)
 
         text = "".join(tokens)
-        text = text.replace("</w>", "")
         return text
 
     def save(self, dirpath):
