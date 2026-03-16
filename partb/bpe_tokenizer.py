@@ -43,32 +43,6 @@ class BPETokenizer:
 
         return [segment for segment in segments if segment]
 
-    def get_stats(self, splits):
-        counts = defaultdict(int)
-        for symbols, freq in splits.items():
-            prev = symbols[0]
-            for sym in symbols[1:]:
-                counts[(prev, sym)] += freq
-                prev = sym
-        return counts
-
-    def merge_pair(self, pair, splits):
-        a, b = pair
-        new_splits = defaultdict(int)
-        for symbols, freq in splits.items():
-            merged = []
-            i = 0
-            L = len(symbols)
-            while i < L:
-                if i < L-1 and symbols[i] == a and symbols[i+1] == b:
-                    merged.append(a + b)
-                    i += 2
-                else:
-                    merged.append(symbols[i])
-                    i += 1
-            new_splits[tuple(merged)] += freq
-        return new_splits
-
     def train(self, corpus, max_time_seconds=10000):
         segment_freqs = defaultdict(int)
         if isinstance(corpus, list):
@@ -82,14 +56,28 @@ class BPETokenizer:
                     continue
                 segment_freqs[segment] += 1
 
-        splits = defaultdict(int)
+        words = []
+        word_freq = []
+
         for segment, freq in segment_freqs.items():
-            splits[tuple(segment)] += freq
+            words.append(list(segment))  # characters (spaces preserved)
+            word_freq.append(freq)
+
+        pair_freq = defaultdict(int)
+        pair_to_words = defaultdict(set)
+
+        for wid, word in enumerate(words):
+            f = word_freq[wid]
+            for i in range(len(word)-1):
+                pair = (word[i], word[i+1])
+                pair_freq[pair] += f
+                pair_to_words[pair].add(wid)
+
 
         char_vocab = set()
-        for symbols in splits:
-            for symbol in symbols:
-                char_vocab.add(symbol)
+        for word in words:
+            for c in word:
+                char_vocab.add(c)
 
         for cp in range(0x0900, 0x0980): # Add devnagiri characters to the character vocabulary
             char_vocab.add(chr(cp))
@@ -99,18 +87,57 @@ class BPETokenizer:
         self.merges = []
         train_start = time.monotonic()
         while current_vocab_size < self.target_vocab_size:
-            if time.monotonic() - train_start > max_time_seconds:  # Timeout 
+            if time.monotonic() - train_start > max_time_seconds:
                 break
 
-            stats = self.get_stats(splits)
-            if not stats:
+            if not pair_freq:
                 break
 
-            best_pair = max(stats, key=stats.get)
-            if stats[best_pair] < 2:  # Prevent overfitting to very rare pairs
+            best_pair = max(pair_freq, key=pair_freq.get)
+            if pair_freq[best_pair] < 2:
                 break
-            splits = self.merge_pair(best_pair, splits)
+
             self.merges.append(best_pair)
+            affected_words = list(pair_to_words[best_pair])
+
+            for wid in affected_words:
+                word = words[wid]
+                freq = word_freq[wid]
+                i = 0
+                while i < len(word)-1:
+                    if (word[i], word[i+1]) == best_pair:
+                        # remove old left pair
+                        if i > 0:
+                            prev = (word[i-1], word[i])
+                            pair_freq[prev] -= freq
+                            pair_to_words[prev].discard(wid)
+
+                        # remove old right pair
+                        if i+2 < len(word):
+                            nxt = (word[i+1], word[i+2])
+                            pair_freq[nxt] -= freq
+                            pair_to_words[nxt].discard(wid)
+
+                        merged = word[i] + word[i+1]
+                        word[i:i+2] = [merged]
+
+                        # add new left pair
+                        if i > 0:
+                            newp = (word[i-1], merged)
+                            pair_freq[newp] += freq
+                            pair_to_words[newp].add(wid)
+
+                        # add new right pair
+                        if i+1 < len(word):
+                            newp = (merged, word[i+1])
+                            pair_freq[newp] += freq
+                            pair_to_words[newp].add(wid)
+
+                    else:
+                        i += 1
+
+            pair_freq.pop(best_pair, None)
+            pair_to_words.pop(best_pair, None)
             current_vocab_size += 1
             # print(f"Current vocab size: {current_vocab_size}, Merged pair: {best_pair}")
 
