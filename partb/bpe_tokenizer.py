@@ -180,7 +180,8 @@ class BPETokenizer:
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
-    def load(self, filepath):
+    def load(self, dirpath):
+        filepath = os.path.join(dirpath, "tokenizer.json")
         with open(filepath, "r", encoding="utf-8") as f:
             data = json.load(f)
         self.target_vocab_size = data["target_vocab_size"]
