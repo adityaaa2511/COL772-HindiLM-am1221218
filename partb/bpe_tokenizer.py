@@ -46,26 +46,30 @@ class BPETokenizer:
     def get_stats(self, splits):
         counts = defaultdict(int)
         for symbols, freq in splits.items():
-            for i in range(len(symbols) - 1):
-                counts[(symbols[i], symbols[i + 1])] += freq
+            prev = symbols[0]
+            for sym in symbols[1:]:
+                counts[(prev, sym)] += freq
+                prev = sym
         return counts
 
     def merge_pair(self, pair, splits):
+        a, b = pair
         new_splits = defaultdict(int)
         for symbols, freq in splits.items():
-            merged_symbols = []
-            index = 0
-            while index < len(symbols):
-                if (index < len(symbols) - 1 and symbols[index] == pair[0] and symbols[index + 1] == pair[1]):
-                    merged_symbols.append(pair[0] + pair[1])
-                    index += 2
+            merged = []
+            i = 0
+            L = len(symbols)
+            while i < L:
+                if i < L-1 and symbols[i] == a and symbols[i+1] == b:
+                    merged.append(a + b)
+                    i += 2
                 else:
-                    merged_symbols.append(symbols[index])
-                    index += 1
-            new_splits[tuple(merged_symbols)] += freq
-        return dict(new_splits)
+                    merged.append(symbols[i])
+                    i += 1
+            new_splits[tuple(merged)] += freq
+        return new_splits
 
-    def train(self, corpus):
+    def train(self, corpus, max_time_seconds=10000):
         segment_freqs = defaultdict(int)
         if isinstance(corpus, list):
             lines = corpus
@@ -78,25 +82,24 @@ class BPETokenizer:
                     continue
                 segment_freqs[segment] += 1
 
-        splits = {}
+        splits = defaultdict(int)
         for segment, freq in segment_freqs.items():
-            symbols = tuple(list(segment))
-            splits[symbols] = freq
+            splits[tuple(segment)] += freq
 
         char_vocab = set()
         for symbols in splits:
             for symbol in symbols:
                 char_vocab.add(symbol)
 
-        # for cp in range(0x0900, 0x0980): # Add devnagiri characters to the character vocabulary
-        #     char_vocab.add(chr(cp))
+        for cp in range(0x0900, 0x0980): # Add devnagiri characters to the character vocabulary
+            char_vocab.add(chr(cp))
 
         current_vocab_size = len(self.special_tokens) + len(char_vocab)
 
         self.merges = []
         train_start = time.monotonic()
         while current_vocab_size < self.target_vocab_size:
-            if time.monotonic() - train_start > 10000:  # Timeout 
+            if time.monotonic() - train_start > max_time_seconds:  # Timeout 
                 break
 
             stats = self.get_stats(splits)
@@ -104,11 +107,12 @@ class BPETokenizer:
                 break
 
             best_pair = max(stats, key=stats.get)
-            if stats[best_pair] < 1:
+            if stats[best_pair] < 2:  # Prevent overfitting to very rare pairs
                 break
             splits = self.merge_pair(best_pair, splits)
             self.merges.append(best_pair)
             current_vocab_size += 1
+            # print(f"Current vocab size: {current_vocab_size}, Merged pair: {best_pair}")
 
         # Build the final vocabulary
         self.vocab = {}
@@ -131,12 +135,12 @@ class BPETokenizer:
         self.inverse_vocab = {v: k for k, v in self.vocab.items()}
 
     def apply_merges(self, token_list):
-        for pair_a, pair_b in self.merges:
+        for a, b in self.merges:
             i = 0
             while i < len(token_list) - 1:
-                if token_list[i] == pair_a and token_list[i + 1] == pair_b:
-                    token_list = token_list[:i] + [pair_a + pair_b] + token_list[i + 2:]
-                    # Don't increment i so we can check for further merges at same position
+                if token_list[i] == a and token_list[i+1] == b:
+                    token_list[i] = a + b
+                    del token_list[i+1]
                 else:
                     i += 1
         return token_list
