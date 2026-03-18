@@ -2,6 +2,7 @@
 # If you wish to change their code, please do so in their respective files under parta/ and partb/ directories.
 import os
 import torch
+import math
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 from matplotlib import pyplot as plt
@@ -33,8 +34,18 @@ class TextDataset(Dataset):
         input_ids = text[:-1]  # All tokens except the last one
         label_ids = text[1:]   # All tokens except the first one
         return torch.tensor(input_ids, dtype=torch.long), torch.tensor(label_ids, dtype=torch.long)
+    
+def cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps):
+    def lr_lambda(step):
+        if step < warmup_steps:
+            return float(step) / float(max(1, warmup_steps))
 
-def train(model,dataloader,optimizer,criterion,accum_steps,device):
+        progress = float(step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+        return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+def train(model,dataloader,optimizer,criterion,scheduler,accum_steps,device):
     model.train()
     total_loss = 0
     optimizer.zero_grad()
@@ -47,11 +58,13 @@ def train(model,dataloader,optimizer,criterion,accum_steps,device):
         if (i + 1) % accum_steps == 0: # Grad accum to increase gbs
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Gradient clipping
             optimizer.step()
+            scheduler.step()  # Update learning rate
             optimizer.zero_grad()
         total_loss += loss.item()
 
     if (i + 1) % accum_steps != 0: # Final step for remaining gradients
         optimizer.step()
+        scheduler.step()
         optimizer.zero_grad()
 
     return total_loss / len(dataloader)
@@ -99,12 +112,17 @@ def main(args):
     criterion = torch.nn.CrossEntropyLoss(ignore_index=-100)
     train_losses, val_losses = [], []
     train_pplxs, val_pplxs = [], []
-    epochs = 10
 
+    epochs = 10
+    accum_steps = 4
+    total_steps = (len(train_loader) // accum_steps) * epochs
+    warmup_steps = int(0.1 * total_steps)
+
+    scheduler = cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps)
     os.makedirs(args.output_model_path, exist_ok=True)
 
     for epoch in range(epochs):
-        train_loss = train(model,train_loader,optimizer,criterion,accum_steps=4,device=device)
+        train_loss = train(model,train_loader,optimizer,criterion,scheduler,accum_steps,device=device)
         valid_loss = evaluate(model,valid_loader,criterion,device=device)
         train_pplx = perplexity(train_loss)
         valid_pplx = perplexity(valid_loss)
