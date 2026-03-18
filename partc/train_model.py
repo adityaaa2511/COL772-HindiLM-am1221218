@@ -1,5 +1,6 @@
 # YOUR TOKENIZER AND MODEL from PART A AND PART B RESPECTIVELY
 # If you wish to change their code, please do so in their respective files under parta/ and partb/ directories.
+import torch
 from partb.bpe_tokenizer import BPETokenizer
 from parta.model import LanguageModel
 
@@ -10,6 +11,34 @@ from .utils import dummy_function  # Replace with actual utility functions as ne
 # You can structure your code as you see fit as long as the CLI works as specified.
 # Finally, treat this as your FINAL MODEL TRAINING SCRIPT. Do not perform hyperparameter tuning here.
 # You can create separate scripts for hyperparameter tuning if needed.
+
+def train(model,dataloader,optimizer,criterion,accum_steps,device):
+    model.train()
+    total_loss = 0
+    for i, (input, labels) in enumerate(dataloader):
+        input, labels = input.to(device), labels.to(device)
+        optimizer.zero_grad()
+        pred = model(input)
+        loss = criterion(pred.view(-1, pred.size(-1)), labels.view(-1))
+        loss.backward()
+        if (i + 1) % accum_steps == 0: # Grad accum to increase gbs
+            optimizer.step()
+            optimizer.zero_grad()
+        total_loss += loss.item()
+
+    return total_loss / len(dataloader)
+
+@torch.no_grad()
+def evaluate(model,dataloader,criterion,device):
+    model.eval()
+    total_loss = 0
+    for input, labels in dataloader:
+        input, labels = input.to(device), labels.to(device)
+        pred = model(input)
+        loss = criterion(pred.view(-1, pred.size(-1)), labels.view(-1))
+        total_loss += loss.item()
+
+    return total_loss / len(dataloader)
 
 def main(args):
     raise NotImplementedError("This is a placeholder for the training script. Please implement the training logic here.")
