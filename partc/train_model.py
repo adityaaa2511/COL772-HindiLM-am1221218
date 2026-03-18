@@ -1,6 +1,10 @@
 # YOUR TOKENIZER AND MODEL from PART A AND PART B RESPECTIVELY
 # If you wish to change their code, please do so in their respective files under parta/ and partb/ directories.
+import os
 import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, Dataset
+from matplotlib import pyplot as plt
 from partb.bpe_tokenizer import BPETokenizer
 from parta.model import LanguageModel
 
@@ -12,19 +16,43 @@ from .utils import dummy_function  # Replace with actual utility functions as ne
 # Finally, treat this as your FINAL MODEL TRAINING SCRIPT. Do not perform hyperparameter tuning here.
 # You can create separate scripts for hyperparameter tuning if needed.
 
+class TextDataset(Dataset):
+    def __init__(self, data_path, tokenizer):
+        self.tokenizer = tokenizer
+        with open(data_path, 'r') as f:
+            self.data = [line.strip() for line in f if line.strip()]
+
+        self.data = [self.tokenizer.encode(text) for text in self.data]
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        text = self.data[idx]
+
+        input_ids = text[:-1]  # All tokens except the last one
+        label_ids = text[1:]   # All tokens except the first one
+        return torch.tensor(input_ids, dtype=torch.long), torch.tensor(label_ids, dtype=torch.long)
+
 def train(model,dataloader,optimizer,criterion,accum_steps,device):
     model.train()
     total_loss = 0
+    optimizer.zero_grad()
     for i, (input, labels) in enumerate(dataloader):
         input, labels = input.to(device), labels.to(device)
-        optimizer.zero_grad()
         pred = model(input)
         loss = criterion(pred.view(-1, pred.size(-1)), labels.view(-1))
+        loss = loss / accum_steps  # Normalize loss for gradient accumulation
         loss.backward()
         if (i + 1) % accum_steps == 0: # Grad accum to increase gbs
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Gradient clipping
             optimizer.step()
             optimizer.zero_grad()
         total_loss += loss.item()
+
+    if (i + 1) % accum_steps != 0: # Final step for remaining gradients
+        optimizer.step()
+        optimizer.zero_grad()
 
     return total_loss / len(dataloader)
 
@@ -40,9 +68,74 @@ def evaluate(model,dataloader,criterion,device):
 
     return total_loss / len(dataloader)
 
-def main(args):
-    raise NotImplementedError("This is a placeholder for the training script. Please implement the training logic here.")
+def perplexity(loss):
+    return torch.exp(loss)
 
+def main(args):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # Load tokenizer
+    tokenizer = BPETokenizer()
+    tokenizer.load(args.tokenizer_path)
+
+    # Load datasets
+    train_dataset = TextDataset(args.train_path, tokenizer)
+    valid_dataset = TextDataset(args.valid_path, tokenizer)
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+    valid_loader = DataLoader(valid_dataset, batch_size=64)
+
+    # Initialize model
+    vocab_size = tokenizer.get_vocab_size()
+    config = {
+        "d_model": 512,
+        "n_heads": 8,
+        "num_layers": 6,
+        "d_head": 64,
+        "d_ff": 2048,
+        "dropout": 0.1,
+        "vocab_size": vocab_size
+    }
+    model = LanguageModel(config).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    criterion = torch.nn.CrossEntropyLoss(ignore_index=-100)
+    train_losses, val_losses = [], []
+    train_pplxs, val_pplxs = [], []
+    epochs = 10
+
+    os.makedirs(args.output_model_path, exist_ok=True)
+
+    for epoch in range(epochs):
+        train_loss = train(model,train_loader,optimizer,criterion,accum_steps=4,device=device)
+        valid_loss = evaluate(model,valid_loader,criterion,device=device)
+        train_pplx = perplexity(train_loss)
+        valid_pplx = perplexity(valid_loss)
+        train_losses.append(train_loss)
+        val_losses.append(valid_loss)
+        train_pplxs.append(train_pplx)
+        val_pplxs.append(valid_pplx)
+        print(f'Epoch {epoch+1}/{epochs}, Train Loss: {train_loss:.4f}, Valid Loss: {valid_loss:.4f}, Train PPLX: {train_pplx:.4f}, Valid PPLX: {valid_pplx:.4f}')
+
+        # Save checkpoint
+        torch.save(model.state_dict(), f"{args.output_model_path}/model.pth")
+
+    # Plot loss
+    plt.figure()
+    plt.plot(train_losses, label='Train Loss')
+    plt.plot(val_losses, label='Valid Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('Training and Validation Loss')
+    plt.legend()
+    plt.savefig('loss_plot.png')
+
+    # Plot perplexity
+    plt.figure()
+    plt.plot(train_pplxs, label='Train Perplexity')
+    plt.plot(val_pplxs, label='Valid Perplexity')
+    plt.xlabel('Epoch')
+    plt.ylabel('Perplexity')
+    plt.title('Training and Validation Perplexity')
+    plt.legend()
+    plt.savefig('perplexity_plot.png')
 
 if __name__ == '__main__':
     import argparse
