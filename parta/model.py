@@ -238,23 +238,26 @@ def collate_fn(batch: Dict[str, List[torch.tensor]]) -> Dict[str, torch.Tensor]:
     """
     PAD_ID = 0  # Assume 0 is the padding token ID
     
-    input_ids = batch['input_ids']
-    attention_masks = batch['attention_mask']
+    input_ids = [item["input_ids"] for item in batch]
+    attention_masks = [item["attention_mask"] for item in batch]
+    labels = [item["labels"] for item in batch]
+    char_lens = [item["char_len"] for item in batch]
 
     max_len = max(len(ids) for ids in input_ids)
 
     padded_ids = []
     padded_masks = []
+    padded_labels = []
 
-    for ids, mask in zip(input_ids, attention_masks):
+    for ids, mask, lbl in zip(input_ids, attention_masks, labels):
         pad_len = max_len - len(ids)
         padded_ids.append(torch.cat([ids, torch.full((pad_len,), PAD_ID)]))
         padded_masks.append(torch.cat([mask, torch.zeros(pad_len)]))
-
-    input_ids = torch.stack(padded_ids).long()
-    attention_mask = torch.stack(padded_masks).long()
+        padded_labels.append(torch.cat([lbl, torch.full((pad_len,), -100)]))
 
     return {
-        "input_ids": input_ids,
-        "attention_mask": attention_mask
+        "input_ids": torch.stack(padded_ids).long(),
+        "attention_mask": torch.stack(padded_masks).long(),
+        "labels": torch.stack(padded_labels).long(),
+        "char_len": char_lens
     }
