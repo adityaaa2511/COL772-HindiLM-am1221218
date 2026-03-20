@@ -24,6 +24,7 @@ class TextDataset(Dataset):
             self.data = [line.strip() for line in f if line.strip()]
 
         self.data = [self.tokenizer.encode(text) for text in self.data]
+        self.char_lens = [len(text) for text in self.data]
 
     def __len__(self):
         return len(self.data)
@@ -36,7 +37,8 @@ class TextDataset(Dataset):
         return {
             "input_ids": torch.tensor(input_ids, dtype=torch.long),
             "labels": torch.tensor(label_ids, dtype=torch.long),
-            "attention_mask": torch.ones(len(input_ids), dtype=torch.long)  # Mask of 1s for actual tokens  
+            "attention_mask": torch.ones(len(input_ids), dtype=torch.long),  # Mask of 1s for actual tokens  
+            "char_len": self.char_lens[idx]
         }
     
 def cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps):
@@ -86,7 +88,7 @@ def train(model,dataloader,optimizer,criterion,scheduler,accum_steps,device):
     return total_loss / total_tokens
 
 @torch.no_grad()
-def evaluate(model,dataloader,criterion,tokenizer,device):
+def evaluate(model,dataloader,criterion,device):
     model.eval()
     total_loss = 0
     total_tokens = 0
@@ -106,11 +108,7 @@ def evaluate(model,dataloader,criterion,tokenizer,device):
         num_tokens = attention_mask.sum().item()
         total_loss += loss.item() * num_tokens  # Scale loss by number of tokens
         total_tokens += num_tokens
-
-        for ids, mask in zip(input, attention_mask):
-            valid_ids = ids[mask == 1].tolist()
-            text = tokenizer.decode(valid_ids)
-            total_chars += len(text)
+        total_chars += sum(batch["char_len"]).item()
 
     avg_loss = total_loss / total_tokens
     bpc = total_loss / (total_chars * math.log(2))
@@ -125,8 +123,8 @@ def main(args):
     # Load datasets
     train_dataset = TextDataset(args.train_path, tokenizer)
     valid_dataset = TextDataset(args.valid_path, tokenizer)
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True,collate_fn=collate_fn)
-    valid_loader = DataLoader(valid_dataset, batch_size=64, collate_fn=collate_fn)
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True,collate_fn=collate_fn, num_workers=8)
+    valid_loader = DataLoader(valid_dataset, batch_size=64, collate_fn=collate_fn, num_workers=8)
 
     # Initialize model
     vocab_size = tokenizer.get_vocab_size()
@@ -155,8 +153,8 @@ def main(args):
     os.makedirs(args.output_model_path, exist_ok=True)
 
     for epoch in range(epochs):
-        train_loss = train(model,train_loader,optimizer,criterion,scheduler,accum_steps,device=device)
-        valid_loss, valid_bpc = evaluate(model,valid_loader,criterion,tokenizer,device=device)
+        train_loss = train(model,train_loader,optimizer,criterion,scheduler,accum_steps,device)
+        valid_loss, valid_bpc = evaluate(model,valid_loader,criterion,device)
 
         train_losses.append(train_loss)
         val_losses.append(valid_loss)
@@ -177,7 +175,7 @@ def main(args):
     plt.legend()
     plt.savefig('loss_plot.png')
 
-    # Plot perplexity
+    # Plot Bits per Character (BPC)
     plt.figure()
     plt.plot(val_bpcs, label='Valid BPC')
     plt.xlabel('Epoch')
