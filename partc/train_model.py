@@ -134,8 +134,6 @@ def main(args):
         "n_heads": 8,
         "n_layers": 6,
         "d_head": 64,
-        "d_ff": 2048,
-        "dropout": 0.1,
         "vocab_size": vocab_size
     }
     model = LanguageModel(config).to(device)
