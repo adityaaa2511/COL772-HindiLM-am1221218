@@ -8,6 +8,7 @@ from torch.utils.data import DataLoader, Dataset
 from matplotlib import pyplot as plt
 from partb.bpe_tokenizer import BPETokenizer
 from parta.model import LanguageModel, collate_fn
+from tqdm import tqdm
 
 # You can also create additional files in this directory and import them here if needed.
 # For example, the line below import a dummy function from utils.py file.
@@ -56,7 +57,7 @@ def train(model,dataloader,optimizer,criterion,scheduler,accum_steps,device):
     total_loss = 0
     total_tokens = 0
     optimizer.zero_grad()
-    for i, batch in enumerate(dataloader):
+    for i, batch in enumerate(tqdm(dataloader)):
         input = batch["input_ids"].to(device)
         labels = batch["labels"].to(device)
         attention_mask = batch["attention_mask"].to(device)
@@ -138,7 +139,7 @@ def main(args):
         "vocab_size": vocab_size
     }
     model = LanguageModel(config).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-2)
     criterion = torch.nn.CrossEntropyLoss(ignore_index=-100)
     train_losses, val_losses = [], []
     val_bpcs = []
@@ -195,3 +196,4 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     main(args)
+    # Try AMP later
