@@ -7,7 +7,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 from matplotlib import pyplot as plt
 from partb.bpe_tokenizer import BPETokenizer
-from parta.model import LanguageModel
+from parta.model import LanguageModel, collate_fn
 
 # You can also create additional files in this directory and import them here if needed.
 # For example, the line below import a dummy function from utils.py file.
@@ -33,7 +33,11 @@ class TextDataset(Dataset):
 
         input_ids = text[:-1]  # All tokens except the last one
         label_ids = text[1:]   # All tokens except the first one
-        return torch.tensor(input_ids, dtype=torch.long), torch.tensor(label_ids, dtype=torch.long)
+        return {
+            "input_ids": torch.tensor(input_ids, dtype=torch.long),
+            "labels": torch.tensor(label_ids, dtype=torch.long),
+            "attention_mask": torch.ones(len(input_ids), dtype=torch.long)  # Mask of 1s for actual tokens  
+        }
     
 def cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps):
     def lr_lambda(step):
@@ -48,41 +52,69 @@ def cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps):
 def train(model,dataloader,optimizer,criterion,scheduler,accum_steps,device):
     model.train()
     total_loss = 0
+    total_tokens = 0
     optimizer.zero_grad()
-    for i, (input, labels) in enumerate(dataloader):
-        input, labels = input.to(device), labels.to(device)
-        pred = model(input)
+    for i, batch in enumerate(dataloader):
+        input = batch["input_ids"].to(device)
+        labels = batch["labels"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
+
+        labels = labels.clone()
+        labels[attention_mask == 0] = -100  # Set padding token labels to -100 to ignore in loss calculation
+
+        pred = model(input, attention_mask=attention_mask)
         loss = criterion(pred.view(-1, pred.size(-1)), labels.view(-1))
+        num_tokens = attention_mask.sum().item()
+
         loss = loss / accum_steps  # Normalize loss for gradient accumulation
         loss.backward()
+
         if (i + 1) % accum_steps == 0: # Grad accum to increase gbs
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Gradient clipping
             optimizer.step()
             scheduler.step()  # Update learning rate
             optimizer.zero_grad()
-        total_loss += loss.item()
+
+        total_loss += loss.item() * accum_steps * num_tokens  # Scale back loss to original value
+        total_tokens += num_tokens
 
     if (i + 1) % accum_steps != 0: # Final step for remaining gradients
         optimizer.step()
         scheduler.step()
         optimizer.zero_grad()
 
-    return total_loss / len(dataloader)
+    return total_loss / total_tokens
 
 @torch.no_grad()
-def evaluate(model,dataloader,criterion,device):
+def evaluate(model,dataloader,criterion,tokenizer,device):
     model.eval()
     total_loss = 0
-    for input, labels in dataloader:
-        input, labels = input.to(device), labels.to(device)
-        pred = model(input)
+    total_tokens = 0
+    total_chars = 0
+
+    for batch in dataloader:
+        input = batch["input_ids"].to(device)
+        labels = batch["labels"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
+
+        labels = labels.clone()
+        labels[attention_mask == 0] = -100  # Set padding token labels to -100 to ignore in loss calculation
+
+        pred = model(input, attention_mask=attention_mask)
         loss = criterion(pred.view(-1, pred.size(-1)), labels.view(-1))
-        total_loss += loss.item()
 
-    return total_loss / len(dataloader)
+        num_tokens = attention_mask.sum().item()
+        total_loss += loss.item() * num_tokens  # Scale loss by number of tokens
+        total_tokens += num_tokens
 
-def perplexity(loss):
-    return torch.exp(loss)
+        for ids, mask in zip(input, attention_mask):
+            valid_ids = ids[mask == 1].tolist()
+            text = tokenizer.decode(valid_ids)
+            total_chars += len(text)
+
+    avg_loss = total_loss / total_tokens
+    bpc = total_loss / (total_chars * math.log(2))
+    return avg_loss, bpc
 
 def main(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -93,8 +125,8 @@ def main(args):
     # Load datasets
     train_dataset = TextDataset(args.train_path, tokenizer)
     valid_dataset = TextDataset(args.valid_path, tokenizer)
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
-    valid_loader = DataLoader(valid_dataset, batch_size=64)
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True,collate_fn=collate_fn)
+    valid_loader = DataLoader(valid_dataset, batch_size=64, collate_fn=collate_fn)
 
     # Initialize model
     vocab_size = tokenizer.get_vocab_size()
@@ -111,26 +143,26 @@ def main(args):
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
     criterion = torch.nn.CrossEntropyLoss(ignore_index=-100)
     train_losses, val_losses = [], []
-    train_pplxs, val_pplxs = [], []
+    val_bpcs = []
 
     epochs = 10
     accum_steps = 4
+
     total_steps = (len(train_loader) // accum_steps) * epochs
     warmup_steps = int(0.1 * total_steps)
-
     scheduler = cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps)
+
     os.makedirs(args.output_model_path, exist_ok=True)
 
     for epoch in range(epochs):
         train_loss = train(model,train_loader,optimizer,criterion,scheduler,accum_steps,device=device)
-        valid_loss = evaluate(model,valid_loader,criterion,device=device)
-        train_pplx = perplexity(train_loss)
-        valid_pplx = perplexity(valid_loss)
+        valid_loss, valid_bpc = evaluate(model,valid_loader,criterion,tokenizer,device=device)
+
         train_losses.append(train_loss)
         val_losses.append(valid_loss)
-        train_pplxs.append(train_pplx)
-        val_pplxs.append(valid_pplx)
-        print(f'Epoch {epoch+1}/{epochs}, Train Loss: {train_loss:.4f}, Valid Loss: {valid_loss:.4f}, Train PPLX: {train_pplx:.4f}, Valid PPLX: {valid_pplx:.4f}')
+        val_bpcs.append(valid_bpc)
+        
+        print(f'Epoch {epoch+1}/{epochs}, Train Loss: {train_loss:.4f}, Val Loss: {valid_loss:.4f}, Val BPC: {valid_bpc:.4f}')
 
         # Save checkpoint
         torch.save(model.state_dict(), f"{args.output_model_path}/model.pth")
@@ -147,13 +179,12 @@ def main(args):
 
     # Plot perplexity
     plt.figure()
-    plt.plot(train_pplxs, label='Train Perplexity')
-    plt.plot(val_pplxs, label='Valid Perplexity')
+    plt.plot(val_bpcs, label='Valid BPC')
     plt.xlabel('Epoch')
-    plt.ylabel('Perplexity')
-    plt.title('Training and Validation Perplexity')
+    plt.ylabel('BPC')
+    plt.title('Validation BPC')
     plt.legend()
-    plt.savefig('perplexity_plot.png')
+    plt.savefig('bpc.png')
 
 if __name__ == '__main__':
     import argparse
