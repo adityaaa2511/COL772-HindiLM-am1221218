@@ -15,6 +15,7 @@ def scaled_dot_product_attention(query,key,value,mask=None,mode='standard',tau=1
         x = x + mask
 
     attn_wts = F.softmax(x,dim=-1)
+    attn_wts = torch.nan_to_num(attn_wts, nan=0.0)
     output = torch.matmul(attn_wts,value)
     return output, attn_wts
 
@@ -29,7 +30,6 @@ class MultiHeadAttention(nn.Module):
         self.W_k = nn.Linear(d_model,d_model, bias=False)
         self.W_v = nn.Linear(d_model,d_model, bias=False)
         self.out_proj = nn.Linear(d_model,d_model, bias=False)
-
 
     def split_heads(self,x):
         B,L,_ = x.shape
@@ -79,7 +79,7 @@ class TransformerBlock(nn.Module):
     
 
 class SinusoidalPositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=512):
+    def __init__(self, d_model, max_len=1024):
         super().__init__()
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len).unsqueeze(1)
@@ -122,7 +122,7 @@ class LanguageModel(nn.Module):
     def create_causal_mask(self, L, device):
 
         mask = torch.triu(torch.ones(L, L, device=device), diagonal=1)
-        mask = mask.masked_fill(mask == 1, float('-inf'))
+        mask = mask.masked_fill(mask == 1, -1e9)
         return mask
 
     def set_weights(self, weights: Dict[str, Any]):
@@ -202,10 +202,10 @@ class LanguageModel(nn.Module):
         X = self.W_vocab(input_ids)
         X = self.pos_encoding(X)
 
-        causal_mask = self.create_causal_mask(L, device)
+        causal_mask = self.create_causal_mask(L, device) # Shape = (L, L)
 
-        padding_mask = torch.zeros_like(attention_mask, dtype=torch.float, device=device)
-        padding_mask = padding_mask.masked_fill(attention_mask == 0, float('-inf'))
+        padding_mask = torch.zeros_like(attention_mask, dtype=torch.float, device=device) # Shape = (B, L)
+        padding_mask = padding_mask.masked_fill(attention_mask == 0, -1e9)
 
         combined_mask = padding_mask.unsqueeze(1) + causal_mask # Shape = (B, L, L)
 
