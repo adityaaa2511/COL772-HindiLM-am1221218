@@ -30,6 +30,7 @@ class MultiHeadAttention(nn.Module):
         self.W_k = nn.Linear(d_model,d_model, bias=False)
         self.W_v = nn.Linear(d_model,d_model, bias=False)
         self.out_proj = nn.Linear(d_model,d_model, bias=False)
+        self.dropout = nn.Dropout(0.1)  
 
     def split_heads(self,x):
         B,L,_ = x.shape
@@ -49,6 +50,7 @@ class MultiHeadAttention(nn.Module):
         attn_output, attn_wts = scaled_dot_product_attention(Q,K,V,mask,mode,tau)
         attn_output = self.merge_heads(attn_output)
         output = self.out_proj(attn_output)
+        output = self.dropout(output)
         return output, attn_wts
 
 class FFN(nn.Module):
@@ -57,7 +59,9 @@ class FFN(nn.Module):
         self.net = nn.Sequential(
             nn.Linear(d_model,4*d_model),
             nn.GELU(),
-            nn.Linear(4*d_model,d_model)
+            nn.Dropout(0.1),
+            nn.Linear(4*d_model,d_model),
+            nn.Dropout(0.1)
         )
 
     def forward(self,x):
@@ -118,6 +122,7 @@ class LanguageModel(nn.Module):
         self.pos_encoding = SinusoidalPositionalEncoding(self.d_model)
         self.W_devocab = nn.Linear(self.d_model, self.vocab_size, bias=False)
         self.final_ln = nn.LayerNorm(self.d_model, elementwise_affine=True)
+        # self.W_devocab.weight = self.W_vocab.weight
 
     def create_causal_mask(self, L, device):
 
@@ -229,19 +234,20 @@ def load_model(config: Dict[str, Any], weights: Dict[str, Any]):
 
     return model
 
+def collate_fn(batch):
+    PAD_ID = 0
 
-def collate_fn(batch: Dict[str, List[torch.tensor]]) -> Dict[str, torch.Tensor]:
-    """
-    This is a sample code. Replace with your own.
-    However, DO NOT CHANGE THE SIGNATURE OF THIS FUNCTION.
-    Ensure that the function takes in a batch of data and outputs a dictionary of tensors ready to be fed into the model.
-    """
-    PAD_ID = 0  # Assume 0 is the padding token ID
-    
-    input_ids = [item["input_ids"] for item in batch]
-    attention_masks = [item["attention_mask"] for item in batch]
-    labels = [item["labels"] for item in batch]
-    char_lens = [item["char_len"] for item in batch]
+    if isinstance(batch, dict) and "input_ids" in batch:
+        input_ids = batch["input_ids"]
+        attention_masks = batch["attention_mask"]
+        labels = batch.get("labels", None)
+        char_lens = batch.get("char_len", None)
+
+    else:
+        input_ids = [item["input_ids"] for item in batch]
+        attention_masks = [item["attention_mask"] for item in batch]
+        labels = [item.get("labels") for item in batch]
+        char_lens = [item.get("char_len") for item in batch]
 
     max_len = max(len(ids) for ids in input_ids)
 
@@ -249,15 +255,28 @@ def collate_fn(batch: Dict[str, List[torch.tensor]]) -> Dict[str, torch.Tensor]:
     padded_masks = []
     padded_labels = []
 
-    for ids, mask, lbl in zip(input_ids, attention_masks, labels):
+    for i in range(len(input_ids)):
+        ids = input_ids[i]
+        mask = attention_masks[i]
+        lbl = labels[i] if labels is not None else None
+
         pad_len = max_len - len(ids)
+
         padded_ids.append(torch.cat([ids, torch.full((pad_len,), PAD_ID)]))
         padded_masks.append(torch.cat([mask, torch.zeros(pad_len)]))
-        padded_labels.append(torch.cat([lbl, torch.full((pad_len,), -100)]))
 
-    return {
+        if lbl is not None:
+            padded_labels.append(torch.cat([lbl, torch.full((pad_len,), -100)]))
+
+    result = {
         "input_ids": torch.stack(padded_ids).long(),
         "attention_mask": torch.stack(padded_masks).long(),
-        "labels": torch.stack(padded_labels).long(),
-        "char_len": char_lens
     }
+
+    if labels is not None:
+        result["labels"] = torch.stack(padded_labels).long()
+
+    if char_lens is not None:
+        result["char_len"] = char_lens
+
+    return result
