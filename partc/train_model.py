@@ -52,11 +52,12 @@ def cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps):
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
-def train(model,dataloader,optimizer,criterion,scheduler,accum_steps,device):
+def train(model,dataloader,optimizer,criterion,scheduler,accum_steps,scaler,device):
     model.train()
     total_loss = 0
     total_tokens = 0
     optimizer.zero_grad()
+
     for i, batch in enumerate(tqdm(dataloader)):
         input = batch["input_ids"].to(device)
         labels = batch["labels"].to(device)
@@ -65,16 +66,19 @@ def train(model,dataloader,optimizer,criterion,scheduler,accum_steps,device):
         labels = labels.clone()
         labels[attention_mask == 0] = -100  # Set padding token labels to -100 to ignore in loss calculation
 
-        pred = model(input, attention_mask=attention_mask)
-        loss = criterion(pred.view(-1, pred.size(-1)), labels.view(-1))
+        with torch.amp.autocast('cuda'):
+            pred = model(input, attention_mask=attention_mask)
+            loss = criterion(pred.view(-1, pred.size(-1)), labels.view(-1))
         num_tokens = attention_mask.sum().item()
 
         loss = loss / accum_steps  # Normalize loss for gradient accumulation
-        loss.backward()
+        scaler.scale(loss).backward()
 
         if (i + 1) % accum_steps == 0: # Grad accum to increase gbs
+            scaler.unscale_(optimizer)  # Unscale gradients before clipping
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Gradient clipping
-            optimizer.step()
+            scaler.step(optimizer)  # Update parameters
+            scaler.update()  # Update the scale for next iteration
             scheduler.step()  # Update learning rate
             optimizer.zero_grad()
 
@@ -82,7 +86,10 @@ def train(model,dataloader,optimizer,criterion,scheduler,accum_steps,device):
         total_tokens += num_tokens
 
     if (i + 1) % accum_steps != 0: # Final step for remaining gradients
-        optimizer.step()
+        scaler.unscale_(optimizer)
+        nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        scaler.step(optimizer)
+        scaler.update()
         scheduler.step()
         optimizer.zero_grad()
 
@@ -103,13 +110,14 @@ def evaluate(model,dataloader,criterion,device):
         labels = labels.clone()
         labels[attention_mask == 0] = -100  # Set padding token labels to -100 to ignore in loss calculation
 
-        pred = model(input, attention_mask=attention_mask)
-        loss = criterion(pred.view(-1, pred.size(-1)), labels.view(-1))
+        with torch.amp.autocast('cuda'):
+            pred = model(input, attention_mask=attention_mask)
+            loss = criterion(pred.view(-1, pred.size(-1)), labels.view(-1))
 
         num_tokens = attention_mask.sum().item()
         total_loss += loss.item() * num_tokens  # Scale loss by number of tokens
         total_tokens += num_tokens
-        total_chars += sum(batch["char_len"]).item()
+        total_chars += sum(batch["char_len"])
 
     avg_loss = total_loss / total_tokens
     bpc = total_loss / (total_chars * math.log(2))
@@ -124,35 +132,37 @@ def main(args):
     # Load datasets
     train_dataset = TextDataset(args.train_path, tokenizer)
     valid_dataset = TextDataset(args.valid_path, tokenizer)
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True,collate_fn=collate_fn, num_workers=8)
-    valid_loader = DataLoader(valid_dataset, batch_size=64, collate_fn=collate_fn, num_workers=8)
+    train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True,collate_fn=collate_fn, num_workers=4)
+    valid_loader = DataLoader(valid_dataset, batch_size=128, collate_fn=collate_fn, num_workers=4)
 
     # Initialize model
     vocab_size = tokenizer.get_vocab_size()
     config = {
-        "d_model": 512,
+        "d_model": 128,
         "n_heads": 8,
-        "n_layers": 6,
-        "d_head": 64,
+        "n_layers": 4,
+        "d_head": 16,
         "vocab_size": vocab_size
     }
     model = LanguageModel(config).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-2)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, weight_decay=0.1)
     criterion = torch.nn.CrossEntropyLoss(ignore_index=-100)
     train_losses, val_losses = [], []
     val_bpcs = []
 
-    epochs = 10
+    epochs = 25
     accum_steps = 4
 
     total_steps = (len(train_loader) // accum_steps) * epochs
-    warmup_steps = int(0.1 * total_steps)
+    warmup_steps = int(0.2 * total_steps)
+    print(f"Total training steps: {total_steps}, Warmup steps: {warmup_steps}")
     scheduler = cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps)
+    scaler = torch.amp.GradScaler()
 
     os.makedirs(args.output_model_path, exist_ok=True)
 
     for epoch in range(epochs):
-        train_loss = train(model,train_loader,optimizer,criterion,scheduler,accum_steps,device)
+        train_loss = train(model,train_loader,optimizer,criterion,scheduler,accum_steps,scaler,device)
         valid_loss, valid_bpc = evaluate(model,valid_loader,criterion,device)
 
         train_losses.append(train_loss)
@@ -194,4 +204,3 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     main(args)
-    # Try AMP later
