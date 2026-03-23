@@ -5,51 +5,39 @@ import time
 from collections import defaultdict
 
 class BPETokenizer:
-    def __init__(self, vocab_size=1000, special_tokens=None):
+    def __init__(self, vocab_size=10000, special_tokens=None):
         self.target_vocab_size = vocab_size
         self.special_tokens = special_tokens or ["<|PAD|>", "<|UNK|>", "<|SOS|>", "<|EOS|>"]
         self.merges = []
         self.vocab = {}
         self.inverse_vocab = {}
-        self._special_token_set = set()
-        self._segment_boundary_pattern = None
-        self._update_segment_pattern()
-
-    def _update_segment_pattern(self):
         self._special_token_set = set(self.special_tokens)
-        if self.special_tokens:
-            escaped = sorted((re.escape(token) for token in self.special_tokens), key=len, reverse=True)
-            pattern = "|".join(escaped)
-            self._segment_boundary_pattern = re.compile(pattern)
-        else:
-            self._segment_boundary_pattern = None
+        escaped = sorted((re.escape(t) for t in self.special_tokens), key=len, reverse=True)
+        self._special_pattern = re.compile("|".join(escaped)) if escaped else None
 
     def _segments(self, text):
-        # Split only around special tokens. Keep normal text chunks intact (including spaces)
-        if not self._segment_boundary_pattern:
-            return [text] if text else []
+        if not self._special_pattern:
+            return [text]
         segments = []
-        last_index = 0
+        last = 0
+        for m in self._special_pattern.finditer(text):
+            s, e = m.span()
+            if s > last:
+                segments.append(text[last:s])
+            segments.append(m.group())
+            last = e
+        if last < len(text):
+            segments.append(text[last:])
+        return segments
 
-        for match in self._segment_boundary_pattern.finditer(text):
-            start, end = match.span()
-            if start > last_index:
-                segments.append(text[last_index:start])
-            segments.append(match.group(0))
-            last_index = end
-
-        if last_index < len(text):
-            segments.append(text[last_index:])
-
-        return [segment for segment in segments if segment]
+    def _split_words(self, text):
+        return re.findall(r'\S+|\s+', text)
 
     def get_stats(self, splits):
         counts = defaultdict(int)
-        for symbols, freq in splits.items():
-            prev = symbols[0]
-            for sym in symbols[1:]:
-                counts[(prev, sym)] += freq
-                prev = sym
+        for tokens, freq in splits.items():
+            for i in range(len(tokens) - 1):
+                counts[(tokens[i], tokens[i + 1])] += freq
         return counts
 
     def merge_pair(self, pair, splits):
@@ -69,7 +57,7 @@ class BPETokenizer:
             new_splits[tuple(merged)] += freq
         return new_splits
 
-    def train(self, corpus, max_time_seconds=10000):
+    def train(self, corpus, max_time_seconds=9000):
         segment_freqs = defaultdict(int)
         if isinstance(corpus, list):
             lines = corpus
@@ -80,19 +68,20 @@ class BPETokenizer:
             for segment in self._segments(line):
                 if segment in self._special_token_set:
                     continue
-                segment_freqs[segment] += 1
+                words = self._split_words(segment)
+                for w in words:
+                    if w:
+                        segment_freqs[w] += 1
 
         splits = defaultdict(int)
-        for segment, freq in segment_freqs.items():
-            splits[tuple(segment)] += freq
-
         char_vocab = set()
-        for symbols in splits:
-            for symbol in symbols:
-                char_vocab.add(symbol)
 
-        for cp in range(0x0900, 0x0980): # Add devnagiri characters to the character vocabulary
-            char_vocab.add(chr(cp))
+        for word, freq in segment_freqs.items():
+            chars = tuple(word)
+            splits[chars] += freq
+            char_vocab.update(chars)
+
+        char_vocab.add(" ")
 
         current_vocab_size = len(self.special_tokens) + len(char_vocab)
 
@@ -112,7 +101,7 @@ class BPETokenizer:
             splits = self.merge_pair(best_pair, splits)
             self.merges.append(best_pair)
             current_vocab_size += 1
-            # print(f"Current vocab size: {current_vocab_size}, Merged pair: {best_pair}")
+            print(f"Vocab size: {current_vocab_size}, merged pair: {best_pair}, freq: {stats[best_pair]}")
 
         # Build the final vocabulary
         self.vocab = {}
@@ -146,17 +135,19 @@ class BPETokenizer:
         return token_list
 
     def encode(self, text):
-        unk_id = self.vocab.get("<|UNK|>", 1)
+        unk_id = self.get_unk_id()
         token_ids = []
 
         for segment in self._segments(text):
             if segment in self._special_token_set:
                 token_ids.append(self.vocab.get(segment, unk_id))
                 continue
-            chars = list(segment)
-            tokens = self.apply_merges(chars)
-            for token in tokens:
-                token_ids.append(self.vocab.get(token, unk_id))
+            words = self._split_words(segment)
+            for w in words:
+                chars = list(w)
+                tokens = self.apply_merges(chars)
+                for token in tokens:
+                    token_ids.append(self.vocab.get(token, unk_id))
 
         return token_ids
 
@@ -176,6 +167,7 @@ class BPETokenizer:
             "merges": self.merges,
             "vocab": self.vocab,
         }
+        os.makedirs(dirpath, exist_ok=True)
         filepath = os.path.join(dirpath, "tokenizer.json")
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -189,10 +181,10 @@ class BPETokenizer:
         self.merges = [tuple(m) for m in data["merges"]]
         self.vocab = data["vocab"]
         self.inverse_vocab = {int(v): k for k, v in self.vocab.items()}
-        self._update_segment_pattern()
+        self._special_token_set = set(self.special_tokens)
 
     def get_vocab_size(self):
         return len(self.vocab)
 
     def get_unk_id(self):
-        return self.vocab.get("<|UNK|>", -1)
+        return self.vocab.get("<|UNK|>", 1)
