@@ -5,10 +5,10 @@ import torch
 import math
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
-from matplotlib import pyplot as plt
-from bpe_tokenizer import BPETokenizer
-from model import LanguageModel, collate_fn
+from partb.bpe_tokenizer import BPETokenizer
+from parta.model import LanguageModel, collate_fn
 from tqdm import tqdm
+import time
 
 # You can also create additional files in this directory and import them here if needed.
 # For example, the line below import a dummy function from utils.py file.
@@ -150,8 +150,6 @@ def main(args):
     model = LanguageModel(config).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.005)
     criterion = torch.nn.CrossEntropyLoss(ignore_index=-100)
-    train_losses, val_losses = [], []
-    train_bpcs, val_bpcs = [], []
 
     epochs = 50
     accum_steps = 8
@@ -165,14 +163,13 @@ def main(args):
 
     os.makedirs(args.output_model_path, exist_ok=True)
 
+    start_time = time.time()
     for epoch in range(epochs):
+        if time.monotonic() - start_time > 14400:  # Stop training after 4 hours
+            print("Stopping training after 4 hours.")
+            break
         train_loss, train_bpc = train(model,train_loader,optimizer,criterion,scheduler,accum_steps,scaler,device)
         valid_loss, valid_bpc = evaluate(model,valid_loader,criterion,device)
-
-        train_losses.append(train_loss)
-        train_bpcs.append(train_bpc)
-        val_losses.append(valid_loss)
-        val_bpcs.append(valid_bpc)
         
         print(f'Epoch {epoch+1}/{epochs}, Train Loss: {train_loss:.4f}, Train BPC: {train_bpc:.4f}, Val Loss: {valid_loss:.4f}, Val BPC: {valid_bpc:.4f}')
 
@@ -180,26 +177,7 @@ def main(args):
         if valid_loss < min_val_loss:
             min_val_loss = valid_loss
             torch.save(model.state_dict(), f"{args.output_model_path}/best_model.pth")
-
-    # Plot loss
-    plt.figure()
-    plt.plot(train_losses, label='Train Loss')
-    plt.plot(val_losses, label='Valid Loss')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.title('Training and Validation Loss')
-    plt.legend()
-    plt.savefig('loss_plot.png')
-
-    # Plot Bits per Character (BPC)
-    plt.figure()
-    plt.plot(train_bpcs, label='Train BPC')
-    plt.plot(val_bpcs, label='Valid BPC')
-    plt.xlabel('Epoch')
-    plt.ylabel('BPC')
-    plt.title('Validation BPC')
-    plt.legend()
-    plt.savefig('bpc.png')
+            print(f"Saved new best model from epoch {epoch+1} with val loss {valid_loss:.4f}")
 
 if __name__ == '__main__':
     import argparse

@@ -20,14 +20,14 @@ fi
 
 # Check which argument was provided and run the corresponding script
 if [ "$1" == "--train-tokenizer" ]; then
-    echo "Using the pretrained tokenizer provided in ./partb/final_tokenizer/ for model training."
-    echo "No need to train the tokenizer again."
+    # echo "Using the pretrained tokenizer provided in ./partb/final_tokenizer/ for model training."
+    # echo "No need to train the tokenizer again."
 
     # UNCOMMENT the line below to train the tokenizer.
-    # echo "Training the tokenizer..."
-    # python -m partb.train_tokenizer --input_corpus_path ./data/tokenizer_corpus.txt \
-    #   --train_path ./data/train.txt \
-    #   --output_tokenizer_path ./partb/final_tokenizer/
+    echo "Training the tokenizer..."
+    python -m partb.train_tokenizer --input_corpus_path ./data/tokenizer_corpus.txt \
+    --train_path ./data/train.txt \
+    --output_tokenizer_path ./partb/final_tokenizer/ --vocab_size 10000
 
 elif [ "$1" == "--train-model" ]; then
     echo "Training the model..."
