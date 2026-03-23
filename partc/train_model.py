@@ -6,13 +6,13 @@ import math
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 from matplotlib import pyplot as plt
-from partb.bpe_tokenizer import BPETokenizer
-from parta.model import LanguageModel, collate_fn
+from bpe_tokenizer import BPETokenizer
+from model import LanguageModel, collate_fn
 from tqdm import tqdm
 
 # You can also create additional files in this directory and import them here if needed.
 # For example, the line below import a dummy function from utils.py file.
-from .utils import dummy_function  # Replace with actual utility functions as needed
+# from .utils import dummy_function  # Replace with actual utility functions as needed
 
 # You can structure your code as you see fit as long as the CLI works as specified.
 # Finally, treat this as your FINAL MODEL TRAINING SCRIPT. Do not perform hyperparameter tuning here.
@@ -24,8 +24,8 @@ class TextDataset(Dataset):
         with open(data_path, 'r') as f:
             self.data = [line.strip() for line in f if line.strip()]
 
-        self.data = [self.tokenizer.encode(text) for text in self.data]
         self.char_lens = [len(text) for text in self.data]
+        self.data = [self.tokenizer.encode(text) for text in self.data]
 
     def __len__(self):
         return len(self.data)
@@ -42,7 +42,7 @@ class TextDataset(Dataset):
             "char_len": self.char_lens[idx]
         }
     
-def cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps):
+def lr_schedule(optimizer, warmup_steps, total_steps):
     def lr_lambda(step):
         if step < warmup_steps:
             return float(step) / float(max(1, warmup_steps))
@@ -56,6 +56,7 @@ def train(model,dataloader,optimizer,criterion,scheduler,accum_steps,scaler,devi
     model.train()
     total_loss = 0
     total_tokens = 0
+    total_chars = 0
     optimizer.zero_grad()
 
     for i, batch in enumerate(tqdm(dataloader)):
@@ -84,6 +85,7 @@ def train(model,dataloader,optimizer,criterion,scheduler,accum_steps,scaler,devi
 
         total_loss += loss.item() * accum_steps * num_tokens  # Scale back loss to original value
         total_tokens += num_tokens
+        total_chars += sum(batch["char_len"])
 
     if (i + 1) % accum_steps != 0: # Final step for remaining gradients
         scaler.unscale_(optimizer)
@@ -93,7 +95,8 @@ def train(model,dataloader,optimizer,criterion,scheduler,accum_steps,scaler,devi
         scheduler.step()
         optimizer.zero_grad()
 
-    return total_loss / total_tokens
+    bpc = total_loss / (total_chars * math.log(2))
+    return total_loss / total_tokens, bpc
 
 @torch.no_grad()
 def evaluate(model,dataloader,criterion,device):
@@ -132,47 +135,51 @@ def main(args):
     # Load datasets
     train_dataset = TextDataset(args.train_path, tokenizer)
     valid_dataset = TextDataset(args.valid_path, tokenizer)
-    train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True,collate_fn=collate_fn, num_workers=4)
-    valid_loader = DataLoader(valid_dataset, batch_size=128, collate_fn=collate_fn, num_workers=4)
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True,collate_fn=collate_fn, num_workers=4)
+    valid_loader = DataLoader(valid_dataset, batch_size=64, collate_fn=collate_fn, num_workers=4)
 
     # Initialize model
     vocab_size = tokenizer.get_vocab_size()
     config = {
-        "d_model": 128,
+        "d_model": 512,
         "n_heads": 8,
-        "n_layers": 4,
-        "d_head": 16,
+        "n_layers": 6,
+        "d_head": 64,
         "vocab_size": vocab_size
     }
     model = LanguageModel(config).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, weight_decay=0.1)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.005)
     criterion = torch.nn.CrossEntropyLoss(ignore_index=-100)
     train_losses, val_losses = [], []
-    val_bpcs = []
+    train_bpcs, val_bpcs = [], []
 
-    epochs = 25
-    accum_steps = 4
+    epochs = 50
+    accum_steps = 8
+    min_val_loss = 1e9
 
     total_steps = (len(train_loader) // accum_steps) * epochs
-    warmup_steps = int(0.2 * total_steps)
+    warmup_steps = int(0.05 * total_steps)
     print(f"Total training steps: {total_steps}, Warmup steps: {warmup_steps}")
-    scheduler = cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps)
+    scheduler = lr_schedule(optimizer, warmup_steps, total_steps)
     scaler = torch.amp.GradScaler()
 
     os.makedirs(args.output_model_path, exist_ok=True)
 
     for epoch in range(epochs):
-        train_loss = train(model,train_loader,optimizer,criterion,scheduler,accum_steps,scaler,device)
+        train_loss, train_bpc = train(model,train_loader,optimizer,criterion,scheduler,accum_steps,scaler,device)
         valid_loss, valid_bpc = evaluate(model,valid_loader,criterion,device)
 
         train_losses.append(train_loss)
+        train_bpcs.append(train_bpc)
         val_losses.append(valid_loss)
         val_bpcs.append(valid_bpc)
         
-        print(f'Epoch {epoch+1}/{epochs}, Train Loss: {train_loss:.4f}, Val Loss: {valid_loss:.4f}, Val BPC: {valid_bpc:.4f}')
+        print(f'Epoch {epoch+1}/{epochs}, Train Loss: {train_loss:.4f}, Train BPC: {train_bpc:.4f}, Val Loss: {valid_loss:.4f}, Val BPC: {valid_bpc:.4f}')
 
         # Save checkpoint
-        torch.save(model.state_dict(), f"{args.output_model_path}/model.pth")
+        if valid_loss < min_val_loss:
+            min_val_loss = valid_loss
+            torch.save(model.state_dict(), f"{args.output_model_path}/best_model.pth")
 
     # Plot loss
     plt.figure()
@@ -186,6 +193,7 @@ def main(args):
 
     # Plot Bits per Character (BPC)
     plt.figure()
+    plt.plot(train_bpcs, label='Train BPC')
     plt.plot(val_bpcs, label='Valid BPC')
     plt.xlabel('Epoch')
     plt.ylabel('BPC')
