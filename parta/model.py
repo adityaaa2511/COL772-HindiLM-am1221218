@@ -15,7 +15,6 @@ def scaled_dot_product_attention(query,key,value,mask=None,mode='standard',tau=1
         x = x + mask
 
     attn_wts = F.softmax(x,dim=-1)
-    attn_wts = torch.nan_to_num(attn_wts, nan=0.0)
     output = torch.matmul(attn_wts,value)
     return output, attn_wts
 
@@ -30,7 +29,7 @@ class MultiHeadAttention(nn.Module):
         self.W_k = nn.Linear(d_model,d_model, bias=False)
         self.W_v = nn.Linear(d_model,d_model, bias=False)
         self.out_proj = nn.Linear(d_model,d_model, bias=False)
-        self.dropout = nn.Dropout(0.1)  
+        # self.dropout = nn.Dropout(0.1)  
 
     def split_heads(self,x):
         B,L,_ = x.shape
@@ -50,7 +49,7 @@ class MultiHeadAttention(nn.Module):
         attn_output, attn_wts = scaled_dot_product_attention(Q,K,V,mask,mode,tau)
         attn_output = self.merge_heads(attn_output)
         output = self.out_proj(attn_output)
-        output = self.dropout(output)
+        # output = self.dropout(output)
         return output, attn_wts
 
 class FFN(nn.Module):
@@ -59,9 +58,9 @@ class FFN(nn.Module):
         self.net = nn.Sequential(
             nn.Linear(d_model,4*d_model),
             nn.GELU(),
-            nn.Dropout(0.1),
+            # nn.Dropout(0.1),
             nn.Linear(4*d_model,d_model),
-            nn.Dropout(0.1)
+            # nn.Dropout(0.1)
         )
 
     def forward(self,x):
@@ -83,7 +82,7 @@ class TransformerBlock(nn.Module):
     
 
 class SinusoidalPositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=1024):
+    def __init__(self, d_model, max_len=512):
         super().__init__()
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len).unsqueeze(1)
